@@ -94,3 +94,8 @@ export function xMode(env: NodeJS.ProcessEnv = process.env): XMode {
 export function dimeClaimUrl(env: NodeJS.ProcessEnv = process.env): string {
   return env.DIME_CLAIM_URL?.trim() || "https://hunt.empowertours.xyz/dime";
 }
+
+/** True until the campaign start. */
+export function beforeStart(cfg: Pick<CampaignConfig, "startsAt">, now: Date = new Date()): boolean {
+  return now.getTime() < cfg.startsAt.getTime();
+}

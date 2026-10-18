@@ -34,7 +34,7 @@ class RedisNonceStore implements NonceStore {
   async consume(key: string, ttlSeconds: number): Promise<boolean> {
     const redis = getRedis();
     if (!redis) throw new Error("redis unavailable");
-    return (await redis.set(key, 1, { nx: true, ex: ttlSeconds })) === "OK";
+    return redis.setNxEx(key, ttlSeconds);
   }
 }
 
@@ -64,7 +64,7 @@ const memoryStore = new MemoryNonceStore();
 export function defaultNonceStore(): NonceStore {
   if (getRedis()) return new RedisNonceStore();
   if (process.env.NODE_ENV === "production") {
-    throw new Error("UPSTASH_REDIS_REST_URL is required in production (nonce replay protection)");
+    throw new Error("UPSTASH_REDIS_REST_URL or REDIS_URL is required in production (nonce replay protection)");
   }
   return memoryStore;
 }

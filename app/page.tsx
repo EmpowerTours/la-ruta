@@ -1,6 +1,6 @@
 import { RouteMap } from "@/components/RouteMap";
 import { RutaPanel } from "@/components/RutaPanel";
-import { campaignConfig, dimeClaimUrl } from "@/lib/la-ruta/config";
+import { beforeStart as isBeforeStart, campaignConfig, dimeClaimUrl, xMode } from "@/lib/la-ruta/config";
 import { POINTS_DISCLAIMER_EN } from "@/lib/la-ruta/points";
 
 export const dynamic = "force-dynamic";
@@ -11,8 +11,16 @@ function fmt(d: Date) {
 
 export default function Home() {
   const cfg = campaignConfig();
+  const beforeStart = isBeforeStart(cfg);
+  const xOff = xMode() === "disabled";
   return (
     <main className="space-y-10">
+      {beforeStart || xOff ? (
+        <div className="rounded-lg border-2 border-route bg-white/70 p-4 text-sm">
+          <strong>Coming soon: La Ruta opens {fmt(cfg.startsAt)}.</strong> You can sign in and check your wallet now. Post
+          submissions open at launch. <span lang="es">Muy pronto: La Ruta abre el {fmt(cfg.startsAt)}.</span>
+        </div>
+      ) : null}
       <section>
         <p className="text-sm uppercase tracking-wide text-route">¿Dime que sí?</p>
         <h1 className="text-4xl font-black leading-tight">La Ruta</h1>
