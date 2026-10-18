@@ -1,0 +1,77 @@
+EmpowerTours La Ruta
+Copyright (c) 2026 EmpowerTours S.A.S. de C.V.
+
+Licensed under the GNU Affero General Public License v3.0 — see LICENSE.
+
+WHY AGPL AND NOT MIT
+
+This repository was MIT licensed by default rather than by decision. MIT lets
+anyone take this work, close it, and sell it, with no obligation to anyone.
+That is not what was intended.
+
+AGPL-3.0 is OSI-approved and genuinely open source: you may read, run, modify
+and redistribute this software. What it adds is section 13 — if you run a
+MODIFIED version of this software as a network service, you must offer your
+users the complete corresponding source of your version, under this same
+licence.
+
+For a hosted web application that is the clause that matters. Someone may fork
+this and compete; they may not fork it, close it, and compete.
+
+WHY THE SOURCE IS PUBLIC AT ALL
+
+Because the product makes claims that are worthless unless they can be checked:
+
+  - that a signed trading bound is enforced by a pure function which fails
+    closed, and refuses to open when the day's loss cannot be VERIFIED rather
+    than merely read as zero (lib/cota/enforce.ts)
+  - that the private note is sealed in the browser with a key derived from the
+    hunter's passkey, and the server stores ciphertext it cannot open
+  - that analytics never receives a wallet address, a transaction hash or an
+    amount, and that URLs are redacted before they leave the browser
+    (components/analytics/track.ts, components/analytics/route-name.ts)
+
+Those are checkable here, by reading the code. That is the point of publishing
+it.
+
+DUAL LICENSING
+
+This software is available under TWO licences, and you choose which one you
+take it under:
+
+  1. GNU AGPL-3.0 (the LICENSE file). Free. You may read, run, modify and
+     redistribute it. If you run a MODIFIED version as a network service you
+     must offer your users the complete corresponding source of your version
+     under this same licence.
+
+  2. A COMMERCIAL licence from EmpowerTours S.A.S. de C.V. For anyone who wants
+     to build on this work without the obligations of AGPL section 13 — to run
+     a modified version as a service while keeping their own source closed.
+     Paid, negotiated per case: admin@empowertours.xyz
+
+Neither licence is a trick. Option 1 is a genuine open-source grant and always
+will be. Option 2 exists because AGPL's obligations are real, and a company
+that cannot accept them should be able to pay rather than simply take.
+
+This arrangement is only possible while EmpowerTours holds the copyright in
+the whole work — see the contributor grant in CONTRIBUTING.md.
+
+COPYRIGHT AND FUTURE LICENSING
+
+EmpowerTours S.A.S. de C.V. holds the copyright in this work. As sole copyright
+holder it may licence future versions under different terms, including making
+this repository private. The AGPL grant applies to the versions published under
+it and cannot be withdrawn from copies already obtained — the same is true of
+the MIT-licensed versions that preceded it.
+
+TRADE MARKS
+
+No rights are granted to the EmpowerTours name, logo or other trade marks.
+The licence covers the code, not the brand.
+
+CONTRACTS
+
+The deployed smart contracts are public on Monad and permissionless to read and
+to call. That is deliberate and is not affected by this licence.
+
+Contact: admin@empowertours.xyz

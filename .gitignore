@@ -1,0 +1,20 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+
+# Secrets (X API keys, session secrets).
+.env
+.env.*
+!.env.example
+
+.DS_Store
+*.pem
+*.key
+npm-debug.log*
+yarn-error.log*
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+coverage/
