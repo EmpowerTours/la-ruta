@@ -1,0 +1,427 @@
+"use client";
+
+import {
+  createPasskeyWithPrfOutput,
+  createSecp256k1SigningSession,
+  getEvmAddress,
+  getPasskeyPrfOutput,
+  isMeraError,
+  type PasskeyCredentialMetadata,
+  type Secp256k1SigningSession,
+} from "@category-labs/mera";
+import { toViemAccount } from "@category-labs/mera/viem";
+import type { LocalAccount } from "viem";
+import {
+  HUNT_PRF_SALT,
+  HUNT_PRF_SALT_LABEL,
+  walletFromPrfOutput,
+} from "./derive";
+import { isUsableCredentialId } from "./credential-id";
+
+// ---------------------------------------------------------------------------
+// COPIED FROM empowertours-hunt lib/auth/passkey.ts (vault parts removed).
+//
+// La Ruta must hand a person the SAME wallet they have in Hunt, Cota and
+// Connect. That holds only while three things stay byte-identical to Hunt:
+//   1. the relying-party id — NEXT_PUBLIC_RP_ID=empowertours.xyz (a parent
+//      domain every *.empowertours.xyz subdomain may use);
+//   2. the PRF salt — HUNT_PRF_SALT in ./derive.ts ("empowertours-hunt/passkey/v1");
+//   3. the derivation — PRF -> BIP-39 -> m/44'/60'/0'/0/0 in ./derive.ts.
+// Change any of them and every person silently gets a different, empty wallet.
+// The credential-id cookie ("et.passkey.credential", domain=empowertours.xyz)
+// is shared with Hunt so a passkey created there is found here directly.
+//
+// The WebAuthn half of player auth. Browser only — mera is a browser library
+// and there is no server SDK, which is why `lib/auth/mera.ts` verifies a
+// signature rather than calling anything from here.
+//
+// The passkey reproduces the same 32 PRF bytes for the same (credential, rpId,
+// salt) forever, so the same face on the same account is always the same
+// wallet. Nothing here reaches a server: the key is derived, used, and zeroed
+// in the page.
+// ---------------------------------------------------------------------------
+
+/** Must equal the host the app is served from, or WebAuthn refuses the ceremony. */
+export const RP_ID = process.env.NEXT_PUBLIC_RP_ID ?? "localhost";
+
+/**
+ * Hunt wallets must never be Regalo wallets.
+ *
+ * Two mechanisms keep them apart — a different relying-party id and a different
+ * PRF salt (see HUNT_PRF_SALT) — and both are configuration, so both can be got
+ * wrong. Serving hunt from Regalo's host would silently hand every player the
+ * wallet they use for gift links: same face, same credential, and only the salt
+ * left standing between two apps' balances.
+ *
+ * A comment does not stop that; this does. Encoded as a check because a rule
+ * nobody can run is not a control.
+ */
+const FOREIGN_RP_IDS = ["regalo.empowertours.xyz"];
+
+/**
+ * Relying-party ids that reach ACROSS EmpowerTours apps rather than naming one.
+ *
+ * WebAuthn accepts an rpId that is a registrable suffix of the origin, so
+ * `empowertours.xyz` served from hunt.empowertours.xyz yields a credential
+ * every sibling subdomain can also invoke. That is exactly what Cota needs —
+ * one passkey, one wallet, whichever door the player came through — and it is
+ * also the moment the relying-party id stops separating anything.
+ *
+ * Under a parent rpId the PRF salt is the ONLY thing standing between hunt's
+ * wallets and Regalo's. That was always the salt's job (see HUNT_PRF_SALT),
+ * but until now it was the second of two mechanisms rather than the last one.
+ * So a parent rpId is allowed and the salt is checked instead of assumed.
+ */
+const PARENT_RP_IDS = ["empowertours.xyz"];
+
+function assertOwnRelyingParty(rpId: string): void {
+  const id = rpId.toLowerCase();
+
+  if (FOREIGN_RP_IDS.includes(id)) {
+    throw new Error(
+      `NEXT_PUBLIC_RP_ID is set to ${rpId}, which belongs to another EmpowerTours app. ` +
+        "Hunt passkeys must be issued under hunt's own host or players share wallets between apps.",
+    );
+  }
+
+  // A parent rpId spends one of the two separations, so the remaining one has
+  // to be verified rather than trusted. A wrong salt here would hand every
+  // player another app's wallet, silently and permanently — the failure the
+  // rpId check exists to prevent, arriving through the other door.
+  if (
+    PARENT_RP_IDS.includes(id) &&
+    HUNT_PRF_SALT_LABEL !== EXPECTED_SALT_LABEL
+  ) {
+    throw new Error(
+      `NEXT_PUBLIC_RP_ID is ${rpId}, which is shared across EmpowerTours subdomains, ` +
+        `but the PRF salt label is "${HUNT_PRF_SALT_LABEL}" rather than ` +
+        `"${EXPECTED_SALT_LABEL}". Under a parent relying-party id the salt is the ` +
+        "only thing keeping hunt wallets apart from another app's.",
+    );
+  }
+}
+
+/**
+ * Pinned here, deliberately apart from derive.ts.
+ *
+ * If this read the label from the same place derive.ts defines it, editing the
+ * label would move both and the check would keep passing — a test that agrees
+ * with whatever it is handed. Two independent statements of the same constant
+ * is the point; derive.test.ts pins the bytes, this pins the name.
+ */
+const EXPECTED_SALT_LABEL = "empowertours-hunt/passkey/v1";
+
+/**
+ * WebAuthn's own timeout is only a hint and some platforms ignore it, so the
+ * ceremony is also raced against a hard guard. Without this the promise can
+ * simply never settle, and a player who opened the page on a device that does
+ * not hold their passkey sits on a spinner with nothing to tap.
+ */
+const CEREMONY_TIMEOUT_MS = 60_000;
+const HARD_GUARD_MS = CEREMONY_TIMEOUT_MS + 15_000;
+
+const CREDENTIAL_KEY = "hunt.passkey.credential";
+
+// The credential id is remembered in localStorage (per-origin) AND — when the
+// relying party is a parent domain shared across EmpowerTours subdomains — in a
+// cookie scoped to that domain.
+//
+// localStorage does NOT cross origins, so a player who created their passkey on
+// hunt.empowertours.xyz arrives at cota.empowertours.xyz with nothing to pass
+// as allowCredentials. A non-discoverable passkey then cannot be found, and
+// Chrome surfaces that as a "cross-origin" refusal / a fallback to "continue
+// with your phone". The cookie carries the credential id across the sibling
+// subdomains so every door can invoke the SAME passkey directly.
+//
+// Safe to share: a credential id is a public handle. The passkey's private key
+// never leaves the authenticator, and use still requires user verification —
+// knowing the id grants nothing on its own.
+const CREDENTIAL_COOKIE = "et.passkey.credential";
+
+/** The domain to scope the cookie to, or null when the rpId is host-specific. */
+function credentialCookieDomain(): string | null {
+  const id = RP_ID.toLowerCase();
+  // Only a real parent domain (has a dot, not localhost) is shared; a
+  // host-specific rpId is one app's and must not leak its id to siblings.
+  if (!id.includes(".") || id === "localhost") return null;
+  return id;
+}
+
+function writeCredentialCookie(meta: PasskeyCredentialMetadata): void {
+  if (typeof document === "undefined") return;
+  const domain = credentialCookieDomain();
+  if (domain === null) return;
+  try {
+    const value = encodeURIComponent(JSON.stringify(meta));
+    // ~400 days, refreshed each sign-in. Lax + Secure: never sent cross-site,
+    // only over https, and it carries no secret regardless.
+    document.cookie = `${CREDENTIAL_COOKIE}=${value}; domain=${domain}; path=/; max-age=34560000; secure; samesite=lax`;
+  } catch {
+    // No cookie just means the cross-subdomain hint is absent; same-origin
+    // localStorage still gets a returning player straight back in.
+  }
+}
+
+function readCredentialCookie(): PasskeyCredentialMetadata | undefined {
+  if (typeof document === "undefined") return undefined;
+  try {
+    const match = document.cookie
+      .split("; ")
+      .find((c) => c.startsWith(`${CREDENTIAL_COOKIE}=`));
+    if (match === undefined) return undefined;
+    const parsed: unknown = JSON.parse(
+      decodeURIComponent(match.slice(CREDENTIAL_COOKIE.length + 1)),
+    );
+    return asCredential(parsed);
+  } catch {
+    return undefined;
+  }
+}
+
+class CeremonyTimeout extends Error {
+  constructor() {
+    super("ceremony timed out");
+    this.name = "CeremonyTimeout";
+  }
+}
+
+async function withGuard<T>(work: Promise<T>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const guard = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new CeremonyTimeout());
+    }, HARD_GUARD_MS);
+  });
+  try {
+    return await Promise.race([work, guard]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+export interface PasskeyAccount {
+  account: LocalAccount;
+  session: Secp256k1SigningSession;
+  /** BIP-39 phrase for this wallet, so a player can take a payout elsewhere. */
+  mnemonic: string;
+  /** Base64url credential id, sent to the server so it can bind it to the row. */
+  credentialId: string;
+}
+
+function asCredential(parsed: unknown): PasskeyCredentialMetadata | undefined {
+  if (
+    typeof parsed === "object" &&
+    parsed !== null &&
+    "credentialId" in parsed &&
+    typeof (parsed as { credentialId: unknown }).credentialId === "string" &&
+    isUsableCredentialId((parsed as { credentialId: string }).credentialId)
+  ) {
+    return parsed as PasskeyCredentialMetadata;
+  }
+  return undefined;
+}
+
+function credentialFromLocalStorage(): PasskeyCredentialMetadata | undefined {
+  try {
+    const raw = localStorage.getItem(CREDENTIAL_KEY);
+    if (raw === null) return undefined;
+    return asCredential(JSON.parse(raw) as unknown);
+  } catch {
+    // ignore
+  }
+  return undefined;
+}
+
+/**
+ * Drop a remembered credential from BOTH places it lives.
+ *
+ * Clearing only localStorage leaves the cookie to hand the same bad id back on
+ * the next call, which is exactly how a stale value outlives every obvious
+ * attempt to clear it.
+ */
+function forgetCredential(): void {
+  try {
+    localStorage.removeItem(CREDENTIAL_KEY);
+  } catch {
+    // ignore
+  }
+  if (typeof document === "undefined") return;
+  const domain = credentialCookieDomain();
+  if (domain === null) return;
+  try {
+    document.cookie = `${CREDENTIAL_COOKIE}=; domain=${domain}; path=/; max-age=0; secure; samesite=lax`;
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Copy a localStorage credential into the shared cross-subdomain cookie.
+ *
+ * Called on every page load (see app/providers.tsx) so a player ALREADY signed
+ * in on hunt seeds the cookie just by opening the app — no fresh passkey
+ * ceremony needed. Without this the cookie would only ever be written during a
+ * sign-in that already succeeded, which for a returning session never re-runs.
+ */
+export function ensureCredentialCookie(): void {
+  const local = credentialFromLocalStorage();
+  if (local) writeCredentialCookie(local);
+}
+
+export function storedCredential(): PasskeyCredentialMetadata | undefined {
+  const local = credentialFromLocalStorage();
+  if (local) {
+    // Backfill the shared cookie so siblings (cota, turbo) can use this same
+    // credential id as allowCredentials rather than a discoverable lookup a
+    // non-resident passkey fails.
+    writeCredentialCookie(local);
+    return local;
+  }
+  // Nothing in this origin's localStorage — on a sibling subdomain that is the
+  // norm, so consult the shared cookie.
+  return readCredentialCookie();
+}
+
+function rememberCredential(credential: PasskeyCredentialMetadata): void {
+  try {
+    localStorage.setItem(
+      CREDENTIAL_KEY,
+      JSON.stringify({
+        credentialId: credential.credentialId,
+        transports: credential.transports,
+      }),
+    );
+  } catch {
+    // Private browsing can refuse storage. The passkey still works; the browser
+    // will offer a chooser next time instead of going straight in.
+  }
+  // Also share it across sibling subdomains so the SAME passkey works on cota
+  // and turbo, not just the origin it was created on.
+  writeCredentialCookie({
+    credentialId: credential.credentialId,
+    transports: credential.transports,
+  });
+}
+
+/**
+ * Exported so the NATIVE fallback (lib/auth/native-passkey.ts) derives the
+ * wallet through exactly this code. Two derivations would be two chances to
+ * produce different addresses from the same passkey, which is the one failure
+ * this whole design exists to prevent.
+ */
+export function accountFromPrfOutput(
+  prfOutput: Uint8Array,
+  credentialId: string,
+): PasskeyAccount {
+  const { mnemonic, privateKey } = walletFromPrfOutput(prfOutput);
+  const session = createSecp256k1SigningSession({ privateKey });
+  const account = toViemAccount(session);
+
+  // mera's address helper and viem's adapter must agree, or something upstream
+  // changed and we should fail loudly rather than register the wrong address as
+  // a player and strand their credit there.
+  if (
+    getEvmAddress(session.publicKey).toLowerCase() !==
+    account.address.toLowerCase()
+  ) {
+    session.end();
+    throw new Error("address mismatch between mera and viem");
+  }
+
+  return { account, session, mnemonic, credentialId };
+}
+
+/** First visit on this device: make a passkey and the wallet behind it. */
+export async function createAccount(
+  displayName = "EmpowerTours wallet",
+): Promise<PasskeyAccount> {
+  assertOwnRelyingParty(RP_ID);
+  const created = await withGuard(
+    createPasskeyWithPrfOutput({
+      rp: { id: RP_ID, name: "EmpowerTours" },
+      user: { name: displayName, displayName },
+      prfSalt: HUNT_PRF_SALT,
+      timeout: CEREMONY_TIMEOUT_MS,
+    }),
+  );
+  rememberCredential(created);
+  return accountFromPrfOutput(created.prfOutput, created.credentialId);
+}
+
+/**
+ * Returning player: same passkey, same 32 bytes, same address.
+ *
+ * With no locally-known credential this still runs, and the platform offers any
+ * discoverable passkey for this relying party — which is how a player who
+ * cleared storage, or arrived on a second device synced to the same iCloud
+ * Keychain or Google Password Manager, gets back into the SAME wallet rather
+ * than silently being given a new one.
+ */
+export async function signInAccount(): Promise<PasskeyAccount> {
+  assertOwnRelyingParty(RP_ID);
+  const known = storedCredential();
+  const lookup = (credential: PasskeyCredentialMetadata | undefined) =>
+    withGuard(
+      getPasskeyPrfOutput({
+        rpId: RP_ID,
+        credential,
+        prfSalt: HUNT_PRF_SALT,
+        timeout: CEREMONY_TIMEOUT_MS,
+      }),
+    );
+
+  // `isUsableCredentialId` already drops ids mera could not decode, but it
+  // mirrors mera's rule from the outside and a future version could tighten
+  // it. INPUT_INVALID is thrown at the input boundary, before any prompt, so
+  // reaching it means the remembered id — not the player — is the problem: no
+  // sheet was shown, nothing was cancelled, and retrying without the id costs
+  // the player nothing. A discoverable lookup then returns the SAME wallet.
+  const { prfOutput, credentialId } = await (async () => {
+    try {
+      return await lookup(known);
+    } catch (err) {
+      if (
+        known === undefined ||
+        !isMeraError(err) ||
+        err.code !== "INPUT_INVALID"
+      ) {
+        throw err;
+      }
+      forgetCredential();
+      return await lookup(undefined);
+    }
+  })();
+  rememberCredential(
+    known?.credentialId === credentialId ? known : { credentialId },
+  );
+  return accountFromPrfOutput(prfOutput, credentialId);
+}
+
+/** Turn a mera failure into something a person can act on. */
+export function explainPasskeyError(err: unknown): string {
+  if (err instanceof CeremonyTimeout) {
+    return "Nothing answered the passkey request. If this device doesn't hold your passkey, open EmpowerTours on the device you first signed in with.";
+  }
+  if (isMeraError(err)) {
+    switch (err.code) {
+      case "PRF_UNAVAILABLE":
+        // mera's verified support matrix. Being specific matters: someone hits
+        // this outdoors, with no one to ask.
+        return "This device can't make an EmpowerTours wallet. On iPhone: use Safari with iCloud Keychain on, and update iOS if it's several years old. On Android: use Chrome signed in to Google Password Manager. 1Password works too. Bitwarden and Dashlane don't yet.";
+      case "PASSKEY_OPERATION_FAILED":
+        return "The passkey prompt was cancelled or unavailable. Tap sign in again.";
+      case "CRYPTO_UNAVAILABLE":
+        return "This page must be opened over HTTPS for passkeys to work.";
+      default:
+        return `Passkey error (${err.code}).`;
+    }
+  }
+  if (err instanceof Error) {
+    // Surface the DOMException type too. On iOS the message alone ("refused",
+    // "cross-origin") is ambiguous; the name (SecurityError, NotAllowedError,
+    // NotSupportedError) is what pins the cause.
+    const kind = err.name && err.name !== "Error" ? `${err.name}: ` : "";
+    return `${kind}${err.message}`;
+  }
+  return "Something went wrong.";
+}

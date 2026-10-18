@@ -1,0 +1,46 @@
+{
+  "name": "la-ruta",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "prisma migrate deploy && next start",
+    "postinstall": "prisma generate",
+    "lint": "eslint",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push"
+  },
+  "dependencies": {
+    "@category-labs/mera": "0.2.0",
+    "@prisma/client": "^6.3.0",
+    "@scure/bip32": "^1.7.0",
+    "@scure/bip39": "^1.6.0",
+    "@upstash/redis": "^1.38.2",
+    "next": "16.3.3",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "server-only": "^0.0.1",
+    "viem": "^2.46.2",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.6",
+    "prisma": "^6.3.0",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vitest": "^3.0.5"
+  }
+}

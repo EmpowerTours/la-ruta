@@ -1,0 +1,205 @@
+// La Ruta — EmpowerTours post-to-earn whitelist.
+//
+// This app has its OWN database. It never writes to Hunt's (or any other
+// project's) database; cross-project eligibility is read through public APIs
+// and Monad reads (lib/la-ruta/eligibility.ts).
+//
+// Conventions copied from empowertours-hunt:
+//   * wallet addresses are stored lowercased, always;
+//   * ledgers and logs are append-only (no update/delete helpers exist);
+//   * every cap is enforced with a conditional UPDATE whose row count is
+//     checked (see lib/la-ruta/spend.ts and lib/la-ruta/picks.ts).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// One person, identified by their EmpowerTours passkey wallet — the same
+/// address Hunt derives (same rpId, same PRF salt; see lib/auth/passkey.ts).
+model RutaPlayer {
+  id            String    @id @default(cuid())
+  walletAddress String    @unique
+  createdAt     DateTime  @default(now())
+  /// Set by an admin. A suspended player can sign in but cannot submit.
+  suspendedAt   DateTime?
+
+  xLink       RutaXLink?
+  entry       RutaEntry?
+  submissions RutaSubmission[]
+  points      RutaPointsLedger[]
+  picks       RutaCollectorPick[]
+}
+
+/// One X account per player and one player per X account. Proven through
+/// OAuth 2.0 PKCE; the user access token is used once for /2/users/me and
+/// then discarded — it is never stored.
+model RutaXLink {
+  id               String     @id @default(cuid())
+  player           RutaPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  playerId         String     @unique
+  xUserId          String     @unique
+  /// Lowercased, without "@".
+  username         String
+  accountCreatedAt DateTime?
+  followersCount   Int?
+  mock             Boolean    @default(false)
+  linkedAt         DateTime   @default(now())
+}
+
+enum RutaSubmissionStatus {
+  /// Passed the first checks; waits for the delayed re-check.
+  PENDING
+  /// Needs a human (or Reach) decision. Never auto-approves.
+  FLAGGED
+  VERIFIED
+  REJECTED
+}
+
+model RutaSubmission {
+  id            String               @id @default(cuid())
+  player        RutaPlayer           @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  playerId      String
+  postId        String               @unique
+  postUrl       String
+  xUserId       String
+  text          String
+  /// Normalised text used for duplicate / copy-paste detection.
+  textNorm      String
+  postCreatedAt DateTime
+  status        RutaSubmissionStatus
+  /// Hard failures (reason codes from lib/la-ruta/verify.ts).
+  reasons       String[]
+  /// Soft signals that sent it to review.
+  flags         String[]
+  /// Metrics at submission and at the re-check, as returned by X.
+  metricsAtSubmit Json?
+  metricsAtRecheck Json?
+  recheckAt     DateTime?
+  rechecks      Int                  @default(0)
+  week          Int
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  reviewNote    String?
+  createdAt     DateTime             @default(now())
+  updatedAt     DateTime             @updatedAt
+
+  reviews RutaReviewLog[]
+  pick    RutaCollectorPick?
+
+  @@index([status, recheckAt])
+  @@index([playerId, createdAt])
+  @@index([week, status])
+}
+
+/// Append-only record of every review decision (admin or Reach).
+model RutaReviewLog {
+  id           String         @id @default(cuid())
+  submission   RutaSubmission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+  submissionId String
+  /// "reach" for the review agent, or the admin wallet address.
+  reviewer     String
+  decision     String
+  reasonCode   String
+  note         String?
+  createdAt    DateTime       @default(now())
+
+  @@index([submissionId])
+}
+
+/// The whitelist. One row per player; `sources` says how they got in.
+model RutaEntry {
+  id            String     @id @default(cuid())
+  player        RutaPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  playerId      String     @unique
+  walletAddress String     @unique
+  /// Any of AUTO (eligibility checker), POST (verified post), ADMIN.
+  sources       String[]
+  /// Eligibility reasons, e.g. "dime_holder", "passport_holder".
+  reasons       String[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+}
+
+/// Append-only points ledger. `refId` makes every grant idempotent.
+model RutaPointsLedger {
+  id        String     @id @default(cuid())
+  player    RutaPlayer @relation(fields: [playerId], references: [id], onDelete: Cascade)
+  playerId  String
+  delta     Int
+  kind      String
+  refId     String     @unique
+  createdAt DateTime   @default(now())
+
+  @@index([playerId])
+}
+
+/// Wallets an admin imported as eligible (e.g. an export from Hunt's admin),
+/// used until the other projects expose an eligibility API.
+model RutaEligibleImport {
+  walletAddress String   @id
+  reason        String
+  importedBy    String
+  createdAt     DateTime @default(now())
+}
+
+/// X accounts known to follow @EmpowerTours (incremental cache).
+model RutaFollower {
+  xUserId String   @id
+  seenAt  DateTime @default(now())
+}
+
+/// Key/value runtime state (e.g. last follower refresh).
+model RutaSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+/// X API spend per calendar month (UTC), in micro-dollars. Reserved BEFORE a
+/// call with a conditional UPDATE against the cap; never refunded.
+model RutaXSpend {
+  month       String   @id
+  spentMicros BigInt   @default(0)
+  calls       Int      @default(0)
+  updatedAt   DateTime @updatedAt
+}
+
+enum RutaPickStatus {
+  SELECTED
+  /// An admin recorded the transfer they made by hand (tx hash).
+  SENT
+  CANCELLED
+}
+
+/// Weekly Collector Edition winners. Selecting a winner moves nothing on
+/// chain: the transfer is a separate, manual admin action, recorded here
+/// afterwards with its tx hash.
+model RutaCollectorPick {
+  id            String         @id @default(cuid())
+  week          Int
+  submission    RutaSubmission @relation(fields: [submissionId], references: [id])
+  submissionId  String         @unique
+  player        RutaPlayer     @relation(fields: [playerId], references: [id])
+  playerId      String
+  walletAddress String
+  status        RutaPickStatus @default(SELECTED)
+  selectedBy    String
+  txHash        String?        @unique
+  note          String?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@index([week, status])
+}
+
+/// Counters behind the pick caps ("week:N" and "total"). Bumped with a
+/// conditional UPDATE so two admins clicking at once cannot exceed a cap.
+model RutaPickCounter {
+  key   String @id
+  count Int    @default(0)
+}
