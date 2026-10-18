@@ -1,0 +1,20 @@
+# Hourly cron caller (Railway cron does not fire reliably, same as Hunt).
+# Needs repo secrets RUTA_URL (e.g. https://ruta.empowertours.xyz) and CRON_SECRET.
+# Does nothing until both are set.
+name: keeper
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch: {}
+permissions: {}
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    steps:
+      - name: La Ruta re-checks + follower refresh
+        env:
+          RUTA_URL: ${{ secrets.RUTA_URL }}
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$RUTA_URL" ] || [ -z "$CRON_SECRET" ]; then echo "not configured"; exit 0; fi
+          curl -fsS -X POST -H "Authorization: Bearer $CRON_SECRET" "$RUTA_URL/api/cron/la-ruta"

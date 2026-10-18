@@ -1,0 +1,17 @@
+@import "tailwindcss";
+
+/* La Ruta — warm route-map palette. Tailwind v4: this @theme block is the config. */
+@theme {
+  --color-paper: #f7f1e6;
+  --color-paper-2: #efe5d2;
+  --color-ink: #1f1a14;
+  --color-ink-dim: #6b5f50;
+  --color-route: #d9480f;
+  --color-route-dim: #f3b38f;
+  --color-live: #2b8a3e;
+  --color-soon: #b08900;
+  --color-locked: #8a8175;
+}
+
+html, body { background: var(--color-paper); color: var(--color-ink); }
+a { text-decoration: underline; text-underline-offset: 3px; }
